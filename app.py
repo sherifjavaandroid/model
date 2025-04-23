@@ -18,8 +18,13 @@ from datetime import datetime
 import base64
 import requests
 
-# استيراد محلل GitHub من المكان الصحيح
-from utils.github_analyzer import GitHubAnalyzer, GitHubAnalysisRequest, GitHubAnalysisResponse, FileAnalysisResult
+# Importar GitHubAnalyzer y modelos relacionados
+from utils.github_analyzer import (
+    GitHubAnalyzer,
+    GitHubAnalysisRequest,
+    GitHubAnalysisResponse,
+    FileAnalysisResult
+)
 
 # Fix encoding issues for Windows
 if sys.platform.startswith('win'):
@@ -365,8 +370,6 @@ async def analyze_code_file(
     except Exception as e:
         logger.error(f"خطأ في تحليل ملف الكود: {e}")
         raise HTTPException(status_code=500, detail=f"حدث خطأ أثناء تحليل ملف الكود: {str(e)}")
-
-
 
 # نقطة نهاية لتحليل مستودع GitHub
 @app.post("/analyze/github", response_model=GitHubAnalysisResponse)
