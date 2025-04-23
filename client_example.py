@@ -30,6 +30,7 @@ class SecurityAnalyzer:
         """تهيئة محلل الأمان مع رابط API"""
         self.api_url = api_url
         self.categories = self._get_categories()
+        self.vulnerabilities = self._get_vulnerabilities()
 
     def _get_categories(self):
         """الحصول على فئات التطبيقات المدعومة"""
@@ -42,6 +43,17 @@ class SecurityAnalyzer:
             print(f"خطأ في الاتصال بالخدمة: {e}")
             return ["Finance", "Health", "Social", "Productivity", "Travel", "Education"]
 
+    def _get_vulnerabilities(self):
+        """الحصول على الثغرات الأمنية المدعومة"""
+        try:
+            response = requests.get(f"{self.api_url}/vulnerabilities")
+            if response.status_code == 200:
+                return response.json().get("vulnerabilities", [])
+            return []
+        except Exception as e:
+            print(f"خطأ في الاتصال بالخدمة: {e}")
+            return []
+
     def check_api_status(self):
         """التحقق من حالة API"""
         try:
@@ -53,7 +65,7 @@ class SecurityAnalyzer:
             print(f"خطأ في الاتصال بالخدمة: {e}")
             return {"api_status": "غير متصل", "model_loaded": False, "dataset_loaded": False}
 
-    def analyze_code(self, code, category="Finance"):
+    def analyze_code(self, code, category="Finance", analyze_context=False, file_extension=None):
         """تحليل الكود للثغرات الأمنية"""
         if category not in self.categories:
             print(f"تحذير: الفئة '{category}' غير موجودة في قائمة الفئات المدعومة. سيتم استخدام 'Finance' كفئة افتراضية.")
@@ -62,7 +74,12 @@ class SecurityAnalyzer:
         try:
             response = requests.post(
                 f"{self.api_url}/analyze",
-                json={"code": code, "category": category}
+                json={
+                    "code": code,
+                    "category": category,
+                    "analyze_context": analyze_context,
+                    "file_extension": file_extension
+                }
             )
 
             if response.status_code == 200:
@@ -75,6 +92,37 @@ class SecurityAnalyzer:
             print(f"خطأ في الاتصال بالخدمة: {e}")
             return None
 
+    def analyze_file(self, file_path, category="Finance", analyze_context=False):
+        """تحليل ملف كود للثغرات الأمنية باستخدام نقطة نهاية الملفات"""
+        if not os.path.exists(file_path):
+            print(f"{Fore.RED}خطأ: ملف الكود '{file_path}' غير موجود.{Style.RESET_ALL}")
+            return None
+
+        if category not in self.categories:
+            print(f"تحذير: الفئة '{category}' غير موجودة في قائمة الفئات المدعومة. سيتم استخدام 'Finance' كفئة افتراضية.")
+            category = "Finance"
+
+        try:
+            with open(file_path, 'rb') as file:
+                files = {'file': (os.path.basename(file_path), file, 'text/plain')}
+                data = {'category': category, 'analyze_context': str(analyze_context).lower()}
+
+                response = requests.post(
+                    f"{self.api_url}/analyze/file",
+                    files=files,
+                    data=data
+                )
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"خطأ: {response.status_code}")
+                print(response.text)
+                return None
+        except Exception as e:
+            print(f"خطأ في تحليل الملف: {e}")
+            return None
+
     def print_analysis_results(self, results):
         """عرض نتائج التحليل بتنسيق مناسب"""
         if not results:
@@ -84,6 +132,26 @@ class SecurityAnalyzer:
         print("\n" + "="*80)
         print(Fore.CYAN + "📊 نتائج تحليل أمان الكود".center(80) + Style.RESET_ALL)
         print("="*80)
+
+        # عرض معلومات السياق إذا كانت متوفرة
+        context_info = results.get("context_info")
+        if context_info:
+            print("\n" + Fore.BLUE + "🔍 معلومات السياق:" + Style.RESET_ALL)
+            security_score = context_info.get("security_score", {})
+            score_color = Fore.GREEN if security_score.get("score", 0) >= 70 else (Fore.YELLOW if security_score.get("score", 0) >= 50 else Fore.RED)
+
+            print(f"• لغة البرمجة: {Fore.CYAN}{context_info.get('language', 'غير معروفة')}{Style.RESET_ALL}")
+            print(f"• تعقيد الكود: {Fore.CYAN}{context_info.get('code_complexity', 'متوسط')}{Style.RESET_ALL}")
+            print(f"• درجة الأمان: {score_color}{security_score.get('score', 0)}/100 (التصنيف: {security_score.get('rating', 'F')}, مستوى الخطورة: {security_score.get('risk_level', 'مرتفع')}){Style.RESET_ALL}")
+
+            # عرض أي تحليل خاص باللغة
+            lang_analysis = context_info.get("language_specific_analysis", {})
+            if lang_analysis and (lang_analysis.get("vulnerabilities") or lang_analysis.get("mitigations")):
+                print(f"• تحليل خاص بلغة {context_info.get('language', 'البرمجة')}:")
+                if lang_analysis.get("vulnerabilities"):
+                    print(f"  - ثغرات: {Fore.RED}{', '.join(lang_analysis.get('vulnerabilities', []))}{Style.RESET_ALL}")
+                if lang_analysis.get("mitigations"):
+                    print(f"  - معالجات: {Fore.GREEN}{', '.join(lang_analysis.get('mitigations', []))}{Style.RESET_ALL}")
 
         # عرض الثغرات الأمنية في جدول
         vulnerabilities = results.get("vulnerabilities", [])
@@ -155,6 +223,9 @@ def main():
     parser.add_argument("--category", type=str, default="Finance", help="فئة التطبيق (مثل Finance, Health, Social)")
     parser.add_argument("--status", action="store_true", help="التحقق من حالة API")
     parser.add_argument("--output", type=str, help="حفظ النتائج في ملف JSON")
+    parser.add_argument("--list-categories", action="store_true", help="عرض قائمة الفئات المدعومة")
+    parser.add_argument("--list-vulnerabilities", action="store_true", help="عرض قائمة الثغرات المدعومة")
+    parser.add_argument("--context", action="store_true", help="تفعيل التحليل المتقدم مع معلومات السياق")
 
     args = parser.parse_args()
 
@@ -168,7 +239,33 @@ def main():
         print(f"حالة الخدمة: {Fore.GREEN if status['api_status'] == 'online' else Fore.RED}{status['api_status']}{Style.RESET_ALL}")
         print(f"النموذج محمّل: {Fore.GREEN + 'نعم' if status['model_loaded'] else Fore.RED + 'لا'}{Style.RESET_ALL}")
         print(f"مجموعة البيانات محمّلة: {Fore.GREEN + 'نعم' if status['dataset_loaded'] else Fore.RED + 'لا'}{Style.RESET_ALL}")
-        print(f"الفئات المدعومة: {', '.join(analyzer.categories)}")
+        print(f"عدد السجلات: {status.get('num_records', 0)}")
+        print(f"عدد الثغرات المدعومة: {status.get('num_vulnerabilities', 0)}")
+        print(f"عدد استراتيجيات التخفيف: {status.get('num_mitigations', 0)}")
+        print(f"عدد أدوات التقييم: {status.get('num_tools', 0)}")
+        print(f"الإصدار: {status.get('version', '1.0.0')}")
+        return
+
+    # عرض قائمة الفئات
+    if args.list_categories:
+        print("\n" + Fore.CYAN + "فئات التطبيقات المدعومة:" + Style.RESET_ALL)
+        for category in analyzer.categories:
+            print(f"• {category}")
+        return
+
+    # عرض قائمة الثغرات
+    if args.list_vulnerabilities:
+        print("\n" + Fore.CYAN + "الثغرات الأمنية المدعومة:" + Style.RESET_ALL)
+        vulnerabilities = analyzer.vulnerabilities
+        vuln_table = []
+        for vuln in vulnerabilities:
+            severity_color = Fore.RED if vuln['severity'] == 'High' or vuln['severity'] == 'Critical' else (Fore.YELLOW if vuln['severity'] == 'Medium' else Fore.GREEN)
+            vuln_table.append([
+                Fore.WHITE + vuln['name'] + Style.RESET_ALL,
+                severity_color + vuln['severity'] + Style.RESET_ALL,
+                vuln['description']
+            ])
+        print(tabulate(vuln_table, headers=["الثغرة", "الخطورة", "الوصف"], tablefmt="grid"))
         return
 
     # تحقق من ملف الكود
@@ -177,13 +274,26 @@ def main():
             print(f"{Fore.RED}خطأ: ملف الكود '{args.file}' غير موجود.{Style.RESET_ALL}")
             return
 
-        # قراءة محتوى ملف الكود
-        with open(args.file, 'r', encoding='utf-8') as f:
-            code = f.read()
+        # الحصول على امتداد الملف
+        file_extension = os.path.splitext(args.file)[1]
 
         # تحليل الكود
         print(f"جاري تحليل الكود من ملف '{args.file}' (الفئة: {args.category})...")
-        results = analyzer.analyze_code(code, args.category)
+
+        # استخدام واجهة API الملفات إذا كانت متاحة
+        try:
+            results = analyzer.analyze_file(args.file, args.category, args.context)
+            if not results:
+                # إذا فشل تحليل الملف، نرجع إلى الطريقة التقليدية
+                with open(args.file, 'r', encoding='utf-8') as f:
+                    code = f.read()
+                results = analyzer.analyze_code(code, args.category, args.context, file_extension)
+        except Exception as e:
+            print(f"{Fore.YELLOW}تعذر استخدام واجهة تحليل الملفات: {e}. سيتم استخدام الطريقة التقليدية.{Style.RESET_ALL}")
+            # قراءة محتوى ملف الكود
+            with open(args.file, 'r', encoding='utf-8') as f:
+                code = f.read()
+            results = analyzer.analyze_code(code, args.category, args.context, file_extension)
 
         # حفظ النتائج في ملف إذا تم تحديد ذلك
         if args.output and results:
@@ -196,6 +306,7 @@ def main():
     else:
         print(f"{Fore.YELLOW}الرجاء تحديد ملف الكود باستخدام '--file'{Style.RESET_ALL}")
         print("مثال: python client_example.py --file app.js --category Finance")
+        print("استخدم --help للحصول على قائمة كاملة بالخيارات المتاحة")
 
 if __name__ == "__main__":
     main()

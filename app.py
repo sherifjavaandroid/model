@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
-from fastapi import FastAPI, Body, HTTPException, Request
+from fastapi import FastAPI, Body, HTTPException, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -26,8 +26,8 @@ logging.basicConfig(
 logger = logging.getLogger("mobile-security-analyzer")
 
 # تحميل قاعدة المعرفة الأمنية
-from utils.security_knowledge import security_knowledge
-from utils.code_analyzer import extract_security_patterns, analyze_code_security
+from utils.security_knowledge import security_knowledge, expand_security_knowledge
+from utils.code_analyzer import extract_security_patterns, analyze_code_security, analyze_code_with_context
 from utils.data_utils import load_dataset
 
 # تعريف الـ FastAPI
@@ -50,6 +50,8 @@ app.add_middleware(
 class CodeAnalysisRequest(BaseModel):
     code: str
     category: str = "Finance"  # القيمة الافتراضية هي Finance
+    file_extension: Optional[str] = None  # إضافة امتداد الملف للتحليل المتقدم
+    analyze_context: Optional[bool] = False  # خيار لتفعيل التحليل المتقدم
 
     class Config:
         schema_extra = {
@@ -66,7 +68,9 @@ class CodeAnalysisRequest(BaseModel):
                     });
                 }
                 """,
-                "category": "Finance"
+                "category": "Finance",
+                "file_extension": ".js",
+                "analyze_context": True
             }
         }
 
@@ -89,11 +93,18 @@ class AssessmentTool(BaseModel):
     purpose: str
     url: Optional[str] = None
 
+class ContextInfo(BaseModel):
+    language: str
+    code_complexity: str
+    security_score: Dict[str, Any]
+    language_specific_analysis: Optional[Dict[str, List[str]]] = None
+
 class SecurityAnalysisResponse(BaseModel):
     vulnerabilities: List[SecurityVulnerability]
     mitigation_strategies: List[MitigationStrategy]
     security_recommendations: List[SecurityRecommendation]
     assessment_tools: List[AssessmentTool]
+    context_info: Optional[ContextInfo] = None
 
 # المسارات للملفات والمجلدات
 MODEL_DIR = os.environ.get("MODEL_DIR", "models")
@@ -116,6 +127,9 @@ except Exception as e:
 try:
     security_data = load_dataset(DATA_PATH)
     logger.info(f"تم تحميل مجموعة البيانات بنجاح! {len(security_data)} سجل.")
+    # توسيع قاعدة المعرفة باستخدام البيانات المحملة
+    expand_security_knowledge(security_data)
+    logger.info("تم توسيع قاعدة المعرفة الأمنية بنجاح!")
 except Exception as e:
     logger.warning(f"لم يتم العثور على مجموعة البيانات: {e}")
     security_data = None
@@ -136,7 +150,7 @@ async def log_requests(request: Request, call_next):
     return response
 
 # دالة لإثراء النتائج بمعلومات من قاعدة المعرفة
-def enrich_response(raw_results):
+def enrich_response(raw_results, context_info=None):
     """إثراء نتائج التحليل الأولية بمعلومات من قاعدة المعرفة."""
     enriched = {
         "vulnerabilities": [],
@@ -187,6 +201,15 @@ def enrich_response(raw_results):
             url=tool_info.get("url")
         ))
 
+    # إضافة معلومات السياق إذا كانت متوفرة
+    if context_info:
+        enriched["context_info"] = ContextInfo(
+            language=context_info.get("language", "unknown"),
+            code_complexity=context_info.get("code_complexity", "Medium"),
+            security_score=context_info.get("security_score", {"score": 0, "rating": "F", "risk_level": "Very High"}),
+            language_specific_analysis=context_info.get("language_specific_analysis")
+        )
+
     return SecurityAnalysisResponse(**enriched)
 
 # نقطة نهاية لتحليل الكود
@@ -197,49 +220,104 @@ async def analyze_code(request: CodeAnalysisRequest):
 
     - **code**: الكود المصدري المراد تحليله
     - **category**: فئة التطبيق (مثل Finance, Health, Social)
+    - **file_extension**: امتداد ملف الكود (اختياري)
+    - **analyze_context**: تفعيل التحليل المتقدم (اختياري)
     """
     if not request.code:
         raise HTTPException(status_code=400, detail="الكود لا يمكن أن يكون فارغاً")
 
     logger.info(f"تحليل كود جديد (الفئة: {request.category}, الطول: {len(request.code)} حرف)")
 
-    # إذا كان النموذج متاحاً، استخدمه
-    if model is not None and vectorizer is not None:
-        try:
-            # استخراج الميزات من الكود
-            patterns = extract_security_patterns(request.code)
-            feature_text = f"Category: {request.category} "
-            for key, value in patterns.items():
-                if value:
-                    feature_text += f"{key} "
+    try:
+        # استخدام التحليل المتقدم إذا تم طلبه
+        if request.analyze_context:
+            raw_results = analyze_code_with_context(
+                request.code,
+                request.category,
+                request.file_extension
+            )
+            context_info = raw_results.pop("context_info", None)
+            return enrich_response(raw_results, context_info)
 
-            # تحويل الميزات إلى متجه
-            X = vectorizer.transform([feature_text])
+        # إذا كان النموذج متاحاً، استخدمه
+        if model is not None and vectorizer is not None:
+            try:
+                # استخراج الميزات من الكود
+                patterns = extract_security_patterns(request.code)
+                feature_text = f"Category: {request.category} "
+                for key, value in patterns.items():
+                    if value:
+                        feature_text += f"{key} "
 
-            # الحصول على التنبؤات
-            predictions = model.predict(X)
+                # تحويل الميزات إلى متجه
+                X = vectorizer.transform([feature_text])
 
-            # استخراج النتائج
-            raw_results = {
-                "vulnerabilities": predictions[0][0].split(', '),
-                "mitigation_strategies": predictions[0][1].split(', '),
-                "security_recommendations": predictions[0][2].split(', '),
-                "assessment_tools": predictions[0][3].split(', ')
-            }
+                # الحصول على التنبؤات
+                predictions = model.predict(X)
 
-            logger.info(f"تم تحليل الكود بنجاح باستخدام النموذج، تم العثور على {len(raw_results['vulnerabilities'])} ثغرة أمنية")
+                # استخراج النتائج
+                raw_results = {
+                    "vulnerabilities": predictions[0][0].split(', '),
+                    "mitigation_strategies": predictions[0][1].split(', '),
+                    "security_recommendations": predictions[0][2].split(', '),
+                    "assessment_tools": predictions[0][3].split(', ')
+                }
 
-            # إثراء النتائج وإرجاعها
-            return enrich_response(raw_results)
+                logger.info(f"تم تحليل الكود بنجاح باستخدام النموذج، تم العثور على {len(raw_results['vulnerabilities'])} ثغرة أمنية")
 
-        except Exception as e:
-            logger.error(f"خطأ في تحليل الكود باستخدام النموذج: {e}")
-            # الانتقال إلى التحليل المستند إلى القواعد كملاذ أخير
+                # إثراء النتائج وإرجاعها
+                return enrich_response(raw_results)
+
+            except Exception as e:
+                logger.error(f"خطأ في تحليل الكود باستخدام النموذج: {e}")
+                # الانتقال إلى التحليل المستند إلى القواعد كملاذ أخير
+                return enrich_response(analyze_code_security(request.code, request.category))
+        else:
+            # إذا لم يكن النموذج متاحاً، استخدم التحليل المستند إلى القواعد
+            logger.info("استخدام التحليل المستند إلى القواعد (النموذج غير متوفر)")
             return enrich_response(analyze_code_security(request.code, request.category))
-    else:
-        # إذا لم يكن النموذج متاحاً، استخدم التحليل المستند إلى القواعد
-        logger.info("استخدام التحليل المستند إلى القواعد (النموذج غير متوفر)")
-        return enrich_response(analyze_code_security(request.code, request.category))
+    except Exception as e:
+        logger.error(f"خطأ في تحليل الكود: {e}")
+        raise HTTPException(status_code=500, detail=f"حدث خطأ أثناء تحليل الكود: {str(e)}")
+
+# نقطة نهاية لتحليل ملف كود
+@app.post("/analyze/file", response_model=SecurityAnalysisResponse)
+async def analyze_code_file(
+        file: UploadFile = File(...),
+        category: str = "Finance",
+        analyze_context: bool = False
+):
+    """
+    تحليل ملف كود للكشف عن الثغرات الأمنية.
+
+    - **file**: ملف الكود المراد تحليله
+    - **category**: فئة التطبيق (مثل Finance, Health, Social)
+    - **analyze_context**: تفعيل التحليل المتقدم (اختياري)
+    """
+    try:
+        # قراءة محتوى الملف
+        content = await file.read()
+        code = content.decode("utf-8")
+
+        # استخراج امتداد الملف
+        filename = file.filename
+        file_extension = os.path.splitext(filename)[1] if filename else None
+
+        # إنشاء طلب التحليل
+        request = CodeAnalysisRequest(
+            code=code,
+            category=category,
+            file_extension=file_extension,
+            analyze_context=analyze_context
+        )
+
+        # استدعاء دالة التحليل
+        return await analyze_code(request)
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="الملف غير قابل للقراءة أو بتنسيق غير مدعوم")
+    except Exception as e:
+        logger.error(f"خطأ في تحليل ملف الكود: {e}")
+        raise HTTPException(status_code=500, detail=f"حدث خطأ أثناء تحليل ملف الكود: {str(e)}")
 
 # نقطة نهاية للصفحة الرئيسية
 @app.get("/")
@@ -247,7 +325,8 @@ async def root():
     return {
         "message": "مرحباً بك في واجهة برمجة تطبيقات محلل أمان التطبيقات المحمولة",
         "documentation": "/docs",
-        "analyze_endpoint": "/analyze"
+        "analyze_endpoint": "/analyze",
+        "analyze_file_endpoint": "/analyze/file"
     }
 
 # نقطة نهاية للحصول على الفئات
@@ -257,7 +336,28 @@ async def get_categories():
     if security_data is not None:
         categories = security_data['Category'].unique().tolist()
         return {"categories": categories}
-    return {"categories": ["Finance", "Health", "Social", "Productivity", "Travel", "Education"]}
+    return {"categories": ["Finance", "Health", "Social", "Productivity", "Travel", "Education",
+                           "Lifestyle", "Entertainment", "Food & Drink", "Shopping", "Communication",
+                           "Art & Design", "Business", "Events", "Environment", "Music", "Sports"]}
+
+# نقطة نهاية للحصول على الثغرات
+@app.get("/vulnerabilities")
+async def get_vulnerabilities():
+    """الحصول على قائمة بجميع الثغرات الأمنية من قاعدة المعرفة."""
+    vulnerabilities = []
+
+    for name, info in security_knowledge["vulnerabilities"].items():
+        vulnerabilities.append({
+            "name": name,
+            "description": info.get("description", ""),
+            "severity": info.get("severity", "Medium")
+        })
+
+    # ترتيب الثغرات حسب الخطورة
+    severity_order = {"Critical": 0, "High": 1, "Medium": 2, "Low": 3}
+    vulnerabilities.sort(key=lambda x: severity_order.get(x["severity"], 4))
+
+    return {"vulnerabilities": vulnerabilities}
 
 # نقطة نهاية للتحقق من حالة الخدمة
 @app.get("/status")
@@ -268,8 +368,11 @@ async def get_status():
         "model_loaded": model is not None and vectorizer is not None,
         "dataset_loaded": security_data is not None,
         "num_records": len(security_data) if security_data is not None else 0,
+        "num_vulnerabilities": len(security_knowledge["vulnerabilities"]),
+        "num_mitigations": len(security_knowledge["mitigations"]),
+        "num_tools": len(security_knowledge["tools"]),
         "environment": os.environ.get("ENVIRONMENT", "development"),
-        "version": "1.0.0"
+        "version": "1.1.0"  # تحديث الإصدار بعد إضافة الميزات الجديدة
     }
 
 # تشغيل التطبيق
