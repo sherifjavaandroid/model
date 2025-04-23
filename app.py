@@ -8,22 +8,64 @@ import uvicorn
 import joblib
 import re
 import os
+import io
+import sys
 from typing import List, Optional, Dict, Any
 import pandas as pd
 import json
 import logging
 from datetime import datetime
 
+# Fix encoding issues for Windows
+if sys.platform.startswith('win'):
+    # Change console encoding to UTF-8
+    if sys.stdout.encoding != 'utf-8':
+        if hasattr(sys.stdout, 'reconfigure'):
+            sys.stdout.reconfigure(encoding='utf-8')
+        else:
+            sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+
+    # Set Windows console code page to UTF-8
+    try:
+        import ctypes
+        kernel32 = ctypes.windll.kernel32
+        kernel32.SetConsoleCP(65001)
+        kernel32.SetConsoleOutputCP(65001)
+    except:
+        pass
+
+# Create a custom logger that handles UTF-8 properly
+class UTF8StreamHandler(logging.StreamHandler):
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            stream = self.stream
+            # Use UTF-8 encoding
+            stream.buffer.write((msg + self.terminator).encode('utf-8'))
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
 # إعداد التسجيل
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("app.log")
-    ]
-)
 logger = logging.getLogger("mobile-security-analyzer")
+logger.setLevel(logging.INFO)
+
+# Remove any existing handlers
+for handler in logger.handlers[:]:
+    logger.removeHandler(handler)
+
+# Add custom UTF-8 handlers
+utf8_handler = UTF8StreamHandler(sys.stdout)
+utf8_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(utf8_handler)
+
+# Add file handler with UTF-8 encoding
+file_handler = logging.FileHandler("app.log", encoding='utf-8')
+file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
+logger.addHandler(file_handler)
+
+# Prevent propagation to avoid duplicate logs
+logger.propagate = False
 
 # تحميل قاعدة المعرفة الأمنية
 from utils.security_knowledge import security_knowledge, expand_security_knowledge
@@ -54,7 +96,7 @@ class CodeAnalysisRequest(BaseModel):
     analyze_context: Optional[bool] = False  # خيار لتفعيل التحليل المتقدم
 
     class Config:
-        schema_extra = {
+        json_schema_extra = {
             "example": {
                 "code": """
                 function login(username, password) {

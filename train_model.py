@@ -47,33 +47,33 @@ def train_security_model(df, output_dir="models", n_estimators=100, max_features
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
         logger.info(f"Created directory {output_dir}")
-    
+
     # Define target variables
     targets = [
-        'Vulnerability_Types', 
+        'Vulnerability_Types',
         'Mitigation_Strategies',
-        'Improvement_Suggestions', 
+        'Improvement_Suggestions',
         'Assessment_Tools_Used'
     ]
-    
+
     # Check for target columns
     for col in targets:
         if col not in df.columns:
             raise ValueError(f"Column {col} not found in dataset")
-    
+
     # Create TF-IDF features
     logger.info(f"Creating TF-IDF features (max_features={max_features})...")
     vectorizer = TfidfVectorizer(max_features=max_features, ngram_range=(1, 2))
     X = vectorizer.fit_transform(df['combined_features'])
-    
+
     # Prepare target variables
     logger.info("Preparing target variables...")
     y = df[targets]
-    
+
     # Split data into training and test sets
     logger.info("Splitting data into training and test sets...")
     X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-    
+
     # Train a multi-output classifier with RandomForest
     logger.info(f"Training model (n_estimators={n_estimators})...")
     start_time = time.time()
@@ -81,23 +81,23 @@ def train_security_model(df, output_dir="models", n_estimators=100, max_features
     model = MultiOutputClassifier(base_classifier)
     model.fit(X_train, y_train)
     training_time = time.time() - start_time
-    
+
     # Evaluate the model
     logger.info(f"Evaluating model...")
     score = model.score(X_test, y_test)
     logger.info(f"Model accuracy: {score:.4f}")
     logger.info(f"Training time: {training_time:.2f} seconds ({training_time/60:.2f} minutes)")
-    
+
     # Save the model and vectorizer
     logger.info(f"Saving model and vectorizer to {output_dir}...")
     joblib.dump(model, os.path.join(output_dir, "security_model.joblib"))
     joblib.dump(vectorizer, os.path.join(output_dir, "vectorizer.joblib"))
-    
+
     # Save category mapping
     with open(os.path.join(output_dir, "category_map.txt"), 'w') as f:
         for category, cat_id in df['category_id'].items():
             f.write(f"{category},{cat_id}\n")
-    
+
     # Save training info with fixed sparse matrix access
     with open(os.path.join(output_dir, "training_info.txt"), 'w') as f:
         f.write(f"Training date: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
@@ -109,7 +109,7 @@ def train_security_model(df, output_dir="models", n_estimators=100, max_features
         f.write(f"Number of trees: {n_estimators}\n")
         f.write(f"Number of categories: {len(df['Category'].unique())}\n")
         f.write(f"Training time: {training_time:.2f} seconds ({training_time/60:.2f} minutes)\n")
-    
+
     return model, vectorizer, score, training_time
 
 def test_model_with_examples(model, vectorizer, examples):
@@ -122,25 +122,25 @@ def test_model_with_examples(model, vectorizer, examples):
         examples: Dictionary of code examples: { example_name: (code, category) }
     """
     logger.info("Testing model with examples...")
-    
+
     for name, (code, category) in examples.items():
         logger.info(f"Testing example: {name} (Category: {category})")
-        
+
         # Extract security patterns from code
         from utils.code_analyzer import extract_security_patterns
-        
+
         patterns = extract_security_patterns(code)
         feature_text = f"Category: {category} "
         for key, value in patterns.items():
             if value:
                 feature_text += f"{key} "
-        
+
         # Transform features using the trained vectorizer
         X = vectorizer.transform([feature_text])
-        
+
         # Predict using the trained model
         predictions = model.predict(X)
-        
+
         # Print results
         logger.info(f"Analysis results for example: {name}")
         logger.info(f"Vulnerabilities: {predictions[0][0]}")
@@ -151,7 +151,7 @@ def test_model_with_examples(model, vectorizer, examples):
 
 def main():
     """Main execution point."""
-    
+
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Train a mobile application security analysis model")
     parser.add_argument("--data", type=str, default="data/Mobile_Security_Dataset.csv", help="Path to the data file")
@@ -159,35 +159,35 @@ def main():
     parser.add_argument("--trees", type=int, default=100, help="Number of trees in the random forest")
     parser.add_argument("--features", type=int, default=5000, help="Maximum number of features in TF-IDF")
     parser.add_argument("--test", action="store_true", help="Test the model after training")
-    
+
     args = parser.parse_args()
-    
+
     # Check for data file
     if not os.path.exists(args.data):
         logger.error(f"Error: Data file '{args.data}' not found.")
         sys.exit(1)
-    
+
     # Process data
     logger.info(f"Loading data from {args.data}...")
     df, category_map = preprocess_data(args.data)
-    
+
     # Display basic info about the data
     logger.info(f"Dataset shape: {df.shape}")
     logger.info(f"Available columns: {df.columns.tolist()}")
     logger.info(f"Number of unique categories: {len(df['Category'].unique())}")
-    
+
     # Train the model
     logger.info("Starting model training...")
     model, vectorizer, score, training_time = train_security_model(
-        df, 
+        df,
         output_dir=args.output,
         n_estimators=args.trees,
         max_features=args.features
     )
-    
+
     logger.info(f"Model training completed! Accuracy: {score:.4f}")
     logger.info(f"Training took {training_time:.2f} seconds ({training_time/60:.2f} minutes)")
-    
+
     # Test the model with examples if requested
     if args.test:
         # Test examples
@@ -241,7 +241,7 @@ def main():
                 "Health"
             )
         }
-        
+
         test_model_with_examples(model, vectorizer, examples)
 
 if __name__ == "__main__":
