@@ -3,7 +3,7 @@
 
 from fastapi import FastAPI, Body, HTTPException, Request, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, HttpUrl
 import uvicorn
 import joblib
 import re
@@ -15,6 +15,8 @@ import pandas as pd
 import json
 import logging
 from datetime import datetime
+import base64
+import requests
 
 # Fix encoding issues for Windows
 if sys.platform.startswith('win'):
@@ -148,6 +150,36 @@ class SecurityAnalysisResponse(BaseModel):
     assessment_tools: List[AssessmentTool]
     context_info: Optional[ContextInfo] = None
 
+# نماذج GitHub
+class GitHubAnalysisRequest(BaseModel):
+    """نموذج طلب تحليل مستودع GitHub"""
+    github_url: HttpUrl
+    category: str = "Finance"
+    analyze_context: bool = True
+    max_files: int = 100
+    github_token: Optional[str] = None
+
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "github_url": "https://github.com/username/repository",
+                "category": "Finance",
+                "analyze_context": True,
+                "max_files": 100,
+                "github_token": None
+            }
+        }
+
+class FileAnalysisResult(BaseModel):
+    path: str
+    analysis: SecurityAnalysisResponse
+
+class GitHubAnalysisResponse(BaseModel):
+    """نموذج استجابة تحليل مستودع GitHub"""
+    repository: Dict[str, Any]
+    files: List[FileAnalysisResult]
+    summary: Dict[str, Any]
+
 # المسارات للملفات والمجلدات
 MODEL_DIR = os.environ.get("MODEL_DIR", "models")
 DATA_PATH = os.environ.get("DATA_PATH", "data/Mobile_Security_Dataset.csv")
@@ -253,6 +285,279 @@ def enrich_response(raw_results, context_info=None):
         )
 
     return SecurityAnalysisResponse(**enriched)
+
+# فئة محلل GitHub
+class GitHubAnalyzer:
+    """
+    فئة لتحليل مستودعات GitHub والكشف عن الثغرات الأمنية في الكود.
+    """
+
+    def __init__(self, github_token: Optional[str] = None):
+        """
+        تهيئة محلل GitHub.
+
+        المعاملات:
+            github_token: رمز OAuth لـ GitHub (اختياري، لكن يزيد من حد الطلبات)
+        """
+        self.base_url = "https://api.github.com"
+        self.headers = {
+            "Accept": "application/vnd.github.v3+json",
+            "User-Agent": "Mobile-Security-Analyzer"
+        }
+        if github_token:
+            self.headers["Authorization"] = f"token {github_token}"
+
+    def parse_github_url(self, url: str) -> tuple:
+        """
+        تحليل رابط GitHub لاستخراج اسم المالك واسم المستودع.
+
+        المعاملات:
+            url: رابط مستودع GitHub
+
+        العوائد:
+            tuple: (owner, repo)
+        """
+        # أنماط لروابط GitHub المختلفة
+        patterns = [
+            r"github\.com/([^/]+)/([^/\s.]+)",  # https://github.com/owner/repo
+            r"github\.com:([^/]+)/([^/\s.]+)",  # git@github.com:owner/repo
+        ]
+
+        for pattern in patterns:
+            match = re.search(pattern, url)
+            if match:
+                owner, repo = match.groups()
+                # إزالة أي امتداد .git من نهاية اسم المستودع
+                repo = repo.rstrip(".git")
+                return owner, repo
+
+        raise ValueError("Invalid GitHub URL format")
+
+    def get_repo_files(self, owner: str, repo: str, path: str = "", ref: str = "main") -> List[Dict]:
+        """
+        الحصول على قائمة الملفات في مستودع أو مجلد معين.
+
+        المعاملات:
+            owner: مالك المستودع
+            repo: اسم المستودع
+            path: المسار داخل المستودع (افتراضي: الجذر)
+            ref: الفرع أو الالتزام (افتراضي: main)
+
+        العوائد:
+            List[Dict]: قائمة بمعلومات الملفات
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/contents/{path}"
+        params = {"ref": ref}
+
+        response = requests.get(url, headers=self.headers, params=params)
+
+        if response.status_code == 404:
+            # جرب الفرع master إذا فشل main
+            params["ref"] = "master"
+            response = requests.get(url, headers=self.headers, params=params)
+
+        response.raise_for_status()
+        return response.json()
+
+    def get_file_content(self, owner: str, repo: str, path: str, ref: str = "main") -> str:
+        """
+        الحصول على محتوى ملف معين من المستودع.
+
+        المعاملات:
+            owner: مالك المستودع
+            repo: اسم المستودع
+            path: مسار الملف
+            ref: الفرع أو الالتزام
+
+        العوائد:
+            str: محتوى الملف
+        """
+        url = f"{self.base_url}/repos/{owner}/{repo}/contents/{path}"
+        params = {"ref": ref}
+
+        response = requests.get(url, headers=self.headers, params=params)
+
+        if response.status_code == 404:
+            # جرب الفرع master إذا فشل main
+            params["ref"] = "master"
+            response = requests.get(url, headers=self.headers, params=params)
+
+        response.raise_for_status()
+        content_data = response.json()
+
+        if content_data.get("encoding") == "base64":
+            content = base64.b64decode(content_data["content"]).decode("utf-8")
+            return content
+        else:
+            raise ValueError("Unsupported content encoding")
+
+    def get_repo_structure(self, owner: str, repo: str, path: str = "", ref: str = "main") -> List[Dict]:
+        """
+        الحصول على هيكل المستودع بشكل تكراري.
+
+        المعاملات:
+            owner: مالك المستودع
+            repo: اسم المستودع
+            path: المسار الحالي
+            ref: الفرع أو الالتزام
+
+        العوائد:
+            List[Dict]: قائمة الملفات والمجلدات
+        """
+        files = []
+        items = self.get_repo_files(owner, repo, path, ref)
+
+        for item in items:
+            if item["type"] == "file":
+                files.append({
+                    "path": item["path"],
+                    "type": "file",
+                    "size": item.get("size", 0),
+                    "sha": item["sha"]
+                })
+            elif item["type"] == "dir":
+                # استكشاف المجلد بشكل تكراري
+                subfiles = self.get_repo_structure(owner, repo, item["path"], ref)
+                files.extend(subfiles)
+
+        return files
+
+    def should_analyze_file(self, file_path: str) -> bool:
+        """
+        تحديد ما إذا كان يجب تحليل الملف بناءً على امتداده.
+
+        المعاملات:
+            file_path: مسار الملف
+
+        العوائد:
+            bool: True إذا كان يجب تحليل الملف
+        """
+        # قائمة الامتدادات المدعومة للتحليل
+        supported_extensions = [
+            '.js', '.ts', '.jsx', '.tsx',  # JavaScript/TypeScript
+            '.java', '.kt',  # Java/Kotlin
+            '.py',  # Python
+            '.php',  # PHP
+            '.rb',  # Ruby
+            '.cs',  # C#
+            '.swift',  # Swift
+            '.go',  # Go
+            '.dart',  # Dart
+            '.sh', '.bash',  # Shell scripts
+            '.sql',  # SQL
+            '.html', '.htm',  # HTML
+            '.vue', '.svelte',  # Vue/Svelte
+        ]
+
+        _, ext = os.path.splitext(file_path.lower())
+        return ext in supported_extensions
+
+    def analyze_repository(self, github_url: str, category: str = "Finance",
+                           analyze_context: bool = True, max_files: int = 100) -> Dict[str, Any]:
+        """
+        تحليل مستودع GitHub كامل.
+
+        المعاملات:
+            github_url: رابط مستودع GitHub
+            category: فئة التطبيق
+            analyze_context: تفعيل التحليل المتقدم
+            max_files: الحد الأقصى لعدد الملفات للتحليل
+
+        العوائد:
+            Dict: نتائج التحليل للمستودع
+        """
+        try:
+            # تحليل الرابط
+            owner, repo = self.parse_github_url(github_url)
+            logger.info(f"Analyzing repository: {owner}/{repo}")
+
+            # الحصول على هيكل المستودع
+            all_files = self.get_repo_structure(owner, repo)
+
+            # تصفية الملفات القابلة للتحليل
+            analyzable_files = [f for f in all_files if self.should_analyze_file(f["path"])]
+
+            # تقييد عدد الملفات
+            if len(analyzable_files) > max_files:
+                logger.warning(f"Repository has {len(analyzable_files)} files. Limiting to {max_files}.")
+                analyzable_files = analyzable_files[:max_files]
+
+            results = {
+                "repository": {
+                    "owner": owner,
+                    "name": repo,
+                    "url": github_url,
+                    "total_files": len(all_files),
+                    "analyzed_files": len(analyzable_files)
+                },
+                "files": [],
+                "summary": {
+                    "total_vulnerabilities": 0,
+                    "vulnerability_types": {},
+                    "files_with_issues": 0,
+                    "common_mitigations": {}
+                }
+            }
+
+            # تحليل كل ملف
+            for file_info in analyzable_files:
+                try:
+                    # الحصول على محتوى الملف
+                    content = self.get_file_content(owner, repo, file_info["path"])
+
+                    # الحصول على امتداد الملف
+                    _, file_extension = os.path.splitext(file_info["path"])
+
+                    # تحليل الملف
+                    if analyze_context:
+                        raw_results = analyze_code_with_context(content, category, file_extension)
+                        context_info = raw_results.pop("context_info", None)
+                        file_analysis = enrich_response(raw_results, context_info)
+                    else:
+                        raw_results = analyze_code_security(content, category)
+                        file_analysis = enrich_response(raw_results)
+
+                    if file_analysis.vulnerabilities:
+                        results["files"].append(FileAnalysisResult(
+                            path=file_info["path"],
+                            analysis=file_analysis
+                        ))
+
+                        # تحديث الملخص
+                        results["summary"]["files_with_issues"] += 1
+                        results["summary"]["total_vulnerabilities"] += len(file_analysis.vulnerabilities)
+
+                        # تجميع أنواع الثغرات
+                        for vuln in file_analysis.vulnerabilities:
+                            vuln_name = vuln.name
+                            results["summary"]["vulnerability_types"][vuln_name] = \
+                                results["summary"]["vulnerability_types"].get(vuln_name, 0) + 1
+
+                        # تجميع استراتيجيات التخفيف
+                        for mit in file_analysis.mitigation_strategies:
+                            mit_name = mit.name
+                            results["summary"]["common_mitigations"][mit_name] = \
+                                results["summary"]["common_mitigations"].get(mit_name, 0) + 1
+
+                except Exception as e:
+                    logger.error(f"Error analyzing file {file_info['path']}: {e}")
+                    continue
+
+            # ترتيب الثغرات واستراتيجيات التخفيف حسب التكرار
+            results["summary"]["vulnerability_types"] = dict(
+                sorted(results["summary"]["vulnerability_types"].items(),
+                       key=lambda x: x[1], reverse=True)
+            )
+            results["summary"]["common_mitigations"] = dict(
+                sorted(results["summary"]["common_mitigations"].items(),
+                       key=lambda x: x[1], reverse=True)
+            )
+
+            return results
+
+        except Exception as e:
+            logger.error(f"Error analyzing repository: {e}")
+            raise HTTPException(status_code=500, detail=f"Failed to analyze repository: {str(e)}")
 
 # نقطة نهاية لتحليل الكود
 @app.post("/analyze", response_model=SecurityAnalysisResponse)
@@ -361,6 +666,31 @@ async def analyze_code_file(
         logger.error(f"خطأ في تحليل ملف الكود: {e}")
         raise HTTPException(status_code=500, detail=f"حدث خطأ أثناء تحليل ملف الكود: {str(e)}")
 
+# نقطة نهاية لتحليل مستودع GitHub
+@app.post("/analyze/github", response_model=GitHubAnalysisResponse)
+async def analyze_github_repository(request: GitHubAnalysisRequest):
+    """
+    تحليل مستودع GitHub كامل.
+
+    - **github_url**: رابط مستودع GitHub
+    - **category**: فئة التطبيق
+    - **analyze_context**: تفعيل التحليل المتقدم
+    - **max_files**: الحد الأقصى لعدد الملفات للتحليل
+    - **github_token**: رمز GitHub OAuth (اختياري)
+    """
+    try:
+        analyzer = GitHubAnalyzer(github_token=request.github_token)
+        results = analyzer.analyze_repository(
+            github_url=str(request.github_url),
+            category=request.category,
+            analyze_context=request.analyze_context,
+            max_files=request.max_files
+        )
+        return GitHubAnalysisResponse(**results)
+    except Exception as e:
+        logger.error(f"Error analyzing GitHub repository: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 # نقطة نهاية للصفحة الرئيسية
 @app.get("/")
 async def root():
@@ -368,7 +698,8 @@ async def root():
         "message": "مرحباً بك في واجهة برمجة تطبيقات محلل أمان التطبيقات المحمولة",
         "documentation": "/docs",
         "analyze_endpoint": "/analyze",
-        "analyze_file_endpoint": "/analyze/file"
+        "analyze_file_endpoint": "/analyze/file",
+        "analyze_github_endpoint": "/analyze/github"
     }
 
 # نقطة نهاية للحصول على الفئات
@@ -414,7 +745,7 @@ async def get_status():
         "num_mitigations": len(security_knowledge["mitigations"]),
         "num_tools": len(security_knowledge["tools"]),
         "environment": os.environ.get("ENVIRONMENT", "development"),
-        "version": "1.1.0"  # تحديث الإصدار بعد إضافة الميزات الجديدة
+        "version": "1.2.0"  # تحديث الإصدار بعد إضافة ميزة GitHub
     }
 
 # تشغيل التطبيق

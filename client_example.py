@@ -9,6 +9,7 @@ import sys
 import colorama
 from colorama import Fore, Back, Style
 from tabulate import tabulate
+from datetime import datetime
 
 # تهيئة دعم الألوان
 colorama.init()
@@ -123,6 +124,35 @@ class SecurityAnalyzer:
             print(f"خطأ في تحليل الملف: {e}")
             return None
 
+    def analyze_github_repository(self, github_url, category="Finance", analyze_context=True,
+                                  max_files=100, github_token=None):
+        """تحليل مستودع GitHub كامل"""
+        if category not in self.categories:
+            print(f"تحذير: الفئة '{category}' غير موجودة في قائمة الفئات المدعومة. سيتم استخدام 'Finance' كفئة افتراضية.")
+            category = "Finance"
+
+        try:
+            response = requests.post(
+                f"{self.api_url}/analyze/github",
+                json={
+                    "github_url": github_url,
+                    "category": category,
+                    "analyze_context": analyze_context,
+                    "max_files": max_files,
+                    "github_token": github_token
+                }
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                print(f"خطأ: {response.status_code}")
+                print(response.text)
+                return None
+        except Exception as e:
+            print(f"خطأ في الاتصال بالخدمة: {e}")
+            return None
+
     def print_analysis_results(self, results):
         """عرض نتائج التحليل بتنسيق مناسب"""
         if not results:
@@ -215,11 +245,79 @@ class SecurityAnalyzer:
 
         print("\n" + "="*80 + "\n")
 
+    def print_github_analysis_results(self, results):
+        """عرض نتائج تحليل مستودع GitHub"""
+        if not results:
+            print("لا توجد نتائج للعرض.")
+            return
+
+        print("\n" + "="*80)
+        print(Fore.CYAN + "📊 نتائج تحليل مستودع GitHub".center(80) + Style.RESET_ALL)
+        print("="*80)
+
+        # معلومات المستودع
+        repo_info = results.get("repository", {})
+        print(f"\n{Fore.BLUE}📁 معلومات المستودع:{Style.RESET_ALL}")
+        print(f"• المالك: {Fore.CYAN}{repo_info.get('owner', 'غير معروف')}{Style.RESET_ALL}")
+        print(f"• الاسم: {Fore.CYAN}{repo_info.get('name', 'غير معروف')}{Style.RESET_ALL}")
+        print(f"• الرابط: {Fore.CYAN}{repo_info.get('url', 'غير معروف')}{Style.RESET_ALL}")
+        print(f"• إجمالي الملفات: {Fore.CYAN}{repo_info.get('total_files', 0)}{Style.RESET_ALL}")
+        print(f"• الملفات التي تم تحليلها: {Fore.CYAN}{repo_info.get('analyzed_files', 0)}{Style.RESET_ALL}")
+
+        # ملخص النتائج
+        summary = results.get("summary", {})
+        print(f"\n{Fore.BLUE}📊 ملخص التحليل:{Style.RESET_ALL}")
+        print(f"• إجمالي الثغرات: {Fore.RED}{summary.get('total_vulnerabilities', 0)}{Style.RESET_ALL}")
+        print(f"• الملفات المتأثرة: {Fore.YELLOW}{summary.get('files_with_issues', 0)}{Style.RESET_ALL}")
+
+        # أنواع الثغرات
+        vuln_types = summary.get("vulnerability_types", {})
+        if vuln_types:
+            print(f"\n{Fore.RED}🔴 أنواع الثغرات المكتشفة:{Style.RESET_ALL}")
+            vuln_table = []
+            for vuln_type, count in vuln_types.items():
+                vuln_table.append([vuln_type, str(count)])
+            print(tabulate(vuln_table, headers=["نوع الثغرة", "العدد"], tablefmt="grid"))
+
+        # استراتيجيات التخفيف الشائعة
+        common_mitigations = summary.get("common_mitigations", {})
+        if common_mitigations:
+            print(f"\n{Fore.GREEN}🛡️ استراتيجيات التخفيف الموصى بها:{Style.RESET_ALL}")
+            mit_table = []
+            for mitigation, count in list(common_mitigations.items())[:5]:  # أعلى 5
+                mit_table.append([mitigation, str(count)])
+            print(tabulate(mit_table, headers=["الاستراتيجية", "التكرار"], tablefmt="grid"))
+
+        # الملفات المتأثرة
+        affected_files = results.get("files", [])
+        if affected_files:
+            print(f"\n{Fore.YELLOW}📄 الملفات المتأثرة:{Style.RESET_ALL}")
+            for file_info in affected_files[:10]:  # عرض أول 10 ملفات فقط
+                file_path = file_info.get("path", "")
+                file_analysis = file_info.get("analysis", {})
+                vulnerabilities = file_analysis.get("vulnerabilities", [])
+
+                print(f"\n• {Fore.CYAN}{file_path}{Style.RESET_ALL}")
+                for vuln in vulnerabilities:
+                    vuln_name = vuln.get("name", "غير معروف")
+                    severity = vuln.get("severity", "متوسط")
+                    severity_color = (Fore.RED if severity in ["High", "Critical"] else
+                                      Fore.YELLOW if severity == "Medium" else Fore.GREEN)
+                    print(f"  - {severity_color}{vuln_name} ({severity}){Style.RESET_ALL}")
+
+            if len(affected_files) > 10:
+                print(f"\n  ... و {len(affected_files) - 10} ملفات أخرى")
+
+        print("\n" + "="*80 + "\n")
+
 def main():
     """النقطة الرئيسية لتشغيل البرنامج"""
     parser = argparse.ArgumentParser(description="تحليل أمان الكود باستخدام API تحليل الأمان")
     parser.add_argument("--url", type=str, default="http://localhost:8000", help="عنوان URL لـ API تحليل الأمان")
     parser.add_argument("--file", type=str, help="مسار ملف الكود المراد تحليله")
+    parser.add_argument("--github", type=str, help="رابط مستودع GitHub للتحليل")
+    parser.add_argument("--github-token", type=str, help="رمز GitHub OAuth للوصول الخاص (اختياري)")
+    parser.add_argument("--max-files", type=int, default=100, help="الحد الأقصى لعدد الملفات للتحليل في مستودع GitHub")
     parser.add_argument("--category", type=str, default="Finance", help="فئة التطبيق (مثل Finance, Health, Social)")
     parser.add_argument("--status", action="store_true", help="التحقق من حالة API")
     parser.add_argument("--output", type=str, help="حفظ النتائج في ملف JSON")
@@ -268,7 +366,30 @@ def main():
         print(tabulate(vuln_table, headers=["الثغرة", "الخطورة", "الوصف"], tablefmt="grid"))
         return
 
-    # تحقق من ملف الكود
+    # تحليل مستودع GitHub
+    if args.github:
+        print(f"جاري تحليل مستودع GitHub: {args.github} (الفئة: {args.category})...")
+        print(f"الحد الأقصى للملفات: {args.max_files}")
+
+        results = analyzer.analyze_github_repository(
+            github_url=args.github,
+            category=args.category,
+            analyze_context=args.context,
+            max_files=args.max_files,
+            github_token=args.github_token
+        )
+
+        # حفظ النتائج إذا تم تحديد ذلك
+        if args.output and results:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                json.dump(results, f, ensure_ascii=False, indent=2)
+            print(f"{Fore.GREEN}تم حفظ النتائج في ملف: {args.output}{Style.RESET_ALL}")
+
+        # عرض النتائج
+        analyzer.print_github_analysis_results(results)
+        return
+
+    # تحليل ملف محلي
     if args.file:
         if not os.path.exists(args.file):
             print(f"{Fore.RED}خطأ: ملف الكود '{args.file}' غير موجود.{Style.RESET_ALL}")
@@ -304,8 +425,9 @@ def main():
         # عرض النتائج
         analyzer.print_analysis_results(results)
     else:
-        print(f"{Fore.YELLOW}الرجاء تحديد ملف الكود باستخدام '--file'{Style.RESET_ALL}")
+        print(f"{Fore.YELLOW}الرجاء تحديد ملف الكود باستخدام '--file' أو مستودع GitHub باستخدام '--github'{Style.RESET_ALL}")
         print("مثال: python client_example.py --file app.js --category Finance")
+        print("مثال: python client_example.py --github https://github.com/username/repository --category Finance")
         print("استخدم --help للحصول على قائمة كاملة بالخيارات المتاحة")
 
 if __name__ == "__main__":
